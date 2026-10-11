@@ -1306,6 +1306,15 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 		if (!ok) m_failed = true;
 	}
 
+	// the extension is dropped, it is added back when recording
+	void browseOutput() {
+		char path[MAX_PATH];
+		if (!os::getSaveFilename(Span(path), "MP4 video\0*.mp4\0", "mp4")) return;
+		StringView view(path);
+		if (endsWithInsensitive(view, ".mp4")) view.removeSuffix(4);
+		m_output = view;
+	}
+
 	bool isAbsolute(const char* path) const {
 		if (!path[0]) return false;
 		return path[0] == '/' || path[0] == '\\' || (path[1] == ':' && path[2] != '\0');
@@ -1552,7 +1561,8 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 				}
 			}
 			const char* preview = m_preset_idx < custom_idx ? PRESETS[m_preset_idx].name : "Custom";
-			if (ImGui::BeginCombo("Preset", preview)) {
+			ImGuiEx::Label("Preset");
+			if (ImGui::BeginCombo("##preset", preview)) {
 				for (i32 i = 0; i <= custom_idx; ++i) {
 					const char* name = i < custom_idx ? PRESETS[i].name : "Custom";
 					if (ImGui::Selectable(name, m_preset_idx == i)) {
@@ -1572,40 +1582,50 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Sets resolution, frame rate, quality and encoder effort.\nThe codec and the output file are not changed.");
 			const bool is_custom = m_preset_idx >= custom_idx;
 
-			inputString("Output file", &m_output);
-			if (ImGui::IsItemHovered()) ImGui::SetTooltip("File name without extension, .mp4 is added.\nRelative to the project directory unless it is an absolute path.");
+			ImGuiEx::Label("Output file");
+			StaticString<MAX_PATH + 8> output_label(m_output.c_str(), ".mp4");
+			ImGui::TextUnformatted(m_output.length() == 0 ? "..." : output_label.data);
+			ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - ImGui::CalcTextSize(ICON_FA_FOLDER_OPEN).x);
+			if (ImGuiEx::IconButton(ICON_FA_FOLDER_OPEN, "Browse")) browseOutput();
 			static const char* SOURCES[] = { "Game view", "Scene view" };
-			ImGui::Combo("Source", (i32*)&m_source, SOURCES, (int)lengthOf(SOURCES));
+			ImGuiEx::Label("Source");
+			ImGui::Combo("##source", (i32*)&m_source, SOURCES, (int)lengthOf(SOURCES));
 			if (ImGui::IsItemHovered()) {
 				ImGui::SetTooltip(m_source == SCENE_VIEW
 					? "Scene view: recorded at the current size of its window.\nThe Scene View tab has to be visible and must not be resized while recording."
 					: "Game view: rendered at the resolution below, its window can be closed.");
 			}
 			static const char* CODECS[] = { "AV1 (royalty free, RTX 40 series or newer)", "H.264", "HEVC" };
-			ImGui::Combo("Codec", &m_codec, CODECS, (int)lengthOf(CODECS));
+			ImGuiEx::Label("Codec");
+			ImGui::Combo("##codec", &m_codec, CODECS, (int)lengthOf(CODECS));
 			if (ImGui::IsItemHovered()) {
 				ImGui::SetTooltip("AV1 is royalty free and needs an RTX 40 series GPU or newer.\nH.264 and HEVC work on older GPUs. All are saved to an MP4 file.");
 			}
 			if (is_custom) {
 				// the scene view is recorded in the size of its window
 				ImGui::BeginDisabled(m_source == SCENE_VIEW);
-				ImGui::InputInt("Width", &m_width, 2, 64);
-				ImGui::InputInt("Height", &m_height, 2, 64);
+				ImGuiEx::Label("Width");
+				ImGui::InputInt("##width", &m_width, 2, 64);
+				ImGuiEx::Label("Height");
+				ImGui::InputInt("##height", &m_height, 2, 64);
 				ImGui::EndDisabled();
 				if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
 					ImGui::SetTooltip("Resolution of the game view video, rounded down to an even number.\nIgnored for the scene view, it is recorded at the size of its window.");
 				}
-				ImGui::InputInt("FPS", &m_fps);
+				ImGuiEx::Label("FPS");
+				ImGui::InputInt("##fps", &m_fps);
 				if (ImGui::IsItemHovered()) {
 					ImGui::SetTooltip("Frame rate of the video. The game is simulated with a fixed step of 1 / FPS\nwhile recording, so it is smooth even if Studio renders slower.");
 				}
 				// NVENC's constant quality level (CQ) is "lower is better", the slider shows the opposite
 				i32 quality = 52 - clamp(m_quality, 1, 51);
-				if (ImGui::SliderInt("Quality", &quality, 1, 51)) m_quality = 52 - quality;
+				ImGuiEx::Label("Quality");
+				if (ImGui::SliderInt("##quality", &quality, 1, 51)) m_quality = 52 - quality;
 				if (ImGui::IsItemHovered()) {
 					ImGui::SetTooltip("How much detail the encoder keeps. Higher is a better picture and a bigger file.\n(NVENC constant quality level %d, lower is better there)", m_quality);
 				}
-				ImGui::SliderInt("Encoder effort", &m_preset, 1, 7);
+				ImGuiEx::Label("Encoder effort");
+				ImGui::SliderInt("##effort", &m_preset, 1, 7);
 				if (ImGui::IsItemHovered()) {
 					ImGui::SetTooltip("Not the target quality (that is Quality above).\nHigher spends more GPU time to compress better at the same quality,\nlower is faster. 1 is the fastest, 7 is the slowest.");
 				}
@@ -1620,7 +1640,6 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 
 			if (m_state == State::IDLE) {
 				if (ImGui::Button(ICON_FA_CIRCLE " Start recording")) start();
-				if (!m_app.getWorldEditor().isGameMode()) ImGui::TextUnformatted("Start the game to record gameplay.");
 			}
 			else if (m_state == State::RECORDING) {
 				if (ImGui::Button(ICON_FA_STOP " Stop recording")) stop();
