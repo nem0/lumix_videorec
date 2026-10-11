@@ -1204,7 +1204,7 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 	// called at the end of every frame of every pipeline, it does nothing unless a frame of the recorded view was requested
 	struct RenderHook final : RenderPlugin {
 		explicit RenderHook(VideoRecorder& owner) : owner(owner) {}
-		void renderEnd(const GBuffer&, RenderBufferHandle output, Pipeline& pipeline) override { owner.onRenderEnd(output, pipeline); }
+		void renderEnd(RenderBufferHandle output, Pipeline& pipeline) override { owner.onRenderEnd(output, pipeline); }
 		VideoRecorder& owner;
 	};
 

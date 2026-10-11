@@ -12,13 +12,6 @@ Records the **game view** or the **scene view** of Lumix Studio to an MP4 file u
 - A Lumix Engine static plugin build.
 - The scene view is recorded only while its window is the visible tab (there is no off-screen fallback for it, the game view has one), and a resize during the recording drops frames.
 - MP4 only (no WebM or MKV), no audio track.
-- **If your project has its own copy of the frame script** (e.g. `render/frame.evox` forked from the engine's `core:render/frame`), it has to run the `END` plugin stage after drawing the 2D layer, otherwise the recorder never gets a frame:
-
-  ```
-  ctx.render2D(result);
-  ctx.runPlugins(.END, result);
-  ctx.endFrame();
-  ```
 
 ## Installation
 
@@ -46,7 +39,7 @@ Settings are saved with Studio's settings (`videorec_*` in `studio.ini`). The re
 ## How it works
 
 - While recording, the engine runs with a **fixed time step** (`Engine::setFixedTimeDelta`, `1 / FPS`) and exactly one frame is captured per step, so the video is smooth even when Studio can't render in real time. Recording a heavy scene just takes longer than the video lasts.
-- The recorder is a `RenderPlugin`. Its `renderEnd` hook (the `END` stage of the frame script, after the UI, film grain and 2D drawing) gets the final image of the recorded view's pipeline and queues the encoding on the render thread.
+- The recorder is a `RenderPlugin`. Its `renderEnd` hook (called at the end of every frame, after the UI, film grain and 2D drawing) gets the final image of the recorded view's pipeline and queues the encoding on the render thread.
 - A small compute pass converts the image from RGBA8 (sRGB) to BGRA8, the result is copied to a ring of 6 textures registered in NVENC, and NVENC encodes them through its D3D12 interface, waiting on the fence of the renderer frame. A worker thread waits for NVENC's output fence and writes the bitstream to the file.
 - If the encoder falls behind, the simulation is paused until it catches up, frames are not dropped. The same happens if the recorded view does not render (e.g. its window is hidden).
 - The encoder uses constant quality VBR, no B-frames, 4:2:0, 8 bit, a key frame every two seconds.
