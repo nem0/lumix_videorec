@@ -58,6 +58,21 @@ struct VideoEncoderSettings {
 // number of frames that can be submitted and not yet collected
 constexpr u32 VIDEO_ENCODER_MAX_IN_FLIGHT = 6;
 
+// opacity of the mouse marker, it fades between the two when a mouse button is pressed or released
+constexpr float CURSOR_ALPHA_IDLE = 0.35f;
+constexpr float CURSOR_ALPHA_PRESSED = 0.75f;
+constexpr float CURSOR_FADE_SECONDS = 0.1f;
+// color of the mouse marker, it fades from the idle color to the pressed color with the opacity
+constexpr float CURSOR_COLOR_IDLE[3] = { 1.f, 1.f, 1.f };
+constexpr float CURSOR_COLOR_PRESSED[3] = { 1.f, 0.3f, 0.2f };
+
+// mouse marker drawn over a frame, the pixel is the center of the marker in the source texture
+struct VideoCursor {
+	bool visible = false;
+	float alpha = CURSOR_ALPHA_IDLE;
+	IVec2 pixel = IVec2(0);
+};
+
 // Minimal MP4 (ISO BMFF) muxer for a single video track: AV1, H.264 and HEVC.
 //
 // File layout: `ftyp`, `mdat` (64 bit size, patched when the recording ends), `moov` at the end. All samples are
@@ -867,6 +882,12 @@ struct VideoEncoder {
 				uint dst;
 				uint width;
 				uint height;
+				float4 cursor_color;
+				int cursor_x;
+				int cursor_y;
+				uint cursor_visible;
+				float cursor_radius;
+				float cursor_alpha;
 			};
 			ConstantBuffer<Params> cb : register(b4);
 
@@ -878,6 +899,12 @@ struct VideoEncoder {
 				float3 lo = v.rgb * 12.92;
 				float3 hi = 1.055 * pow(max(v.rgb, 0.0031308), 1.0 / 2.4) - 0.055;
 				v.rgb = lerp(hi, lo, step(v.rgb, 0.0031308));
+				// the marker is drawn after the conversion, a white disc blended over the frame with a 1 pixel antialiased edge
+				if (cb.cursor_visible) {
+					float dist = length(float2(thread_id.xy) + 0.5 - float2(cb.cursor_x, cb.cursor_y));
+					float coverage = saturate(cb.cursor_radius - dist + 0.5);
+					v.rgb = lerp(v.rgb, cb.cursor_color.rgb, coverage * cb.cursor_alpha);
+				}
 				bindless_rw_textures[cb.dst][thread_id.xy] = v;
 			}
 		)#";
@@ -900,7 +927,7 @@ struct VideoEncoder {
 	}
 
 	// Render thread, copies the frame and submits it to NVENC, the result is collected by `collect`.
-	bool submit(gpu::TextureHandle texture) {
+	bool submit(gpu::TextureHandle texture, const VideoCursor& cursor) {
 		if (m_failed || !m_session) return false;
 		u32 index;
 		{
@@ -921,12 +948,21 @@ struct VideoEncoder {
 		}
 
 		// RGBA8 -> BGRA8 (the typed UAV store swaps the channels), the engine tracks the states of both textures
-		struct { u32 src; u32 dst; u32 width; u32 height; } params = {
-			gpu::getBindlessHandle(texture).value,
-			gpu::getRWBindlessHandle(m_swizzled).value,
-			m_settings.source_width,
-			m_settings.source_height
-		};
+		struct { u32 src; u32 dst; u32 width; u32 height; float cursor_color[4]; i32 cursor_x; i32 cursor_y; u32 cursor_visible; float cursor_radius; float cursor_alpha; } params = {};
+		params.src = gpu::getBindlessHandle(texture).value;
+		params.dst = gpu::getRWBindlessHandle(m_swizzled).value;
+		params.width = m_settings.source_width;
+		params.height = m_settings.source_height;
+		params.cursor_x = cursor.pixel.x;
+		params.cursor_y = cursor.pixel.y;
+		params.cursor_visible = cursor.visible;
+		// radius is 1/60 of the height (18 pixels at 1080p), at least 8 pixels
+		const u32 radius = m_settings.source_height / 60;
+		params.cursor_radius = (float)(radius < 8 ? 8 : radius);
+		params.cursor_alpha = cursor.alpha;
+		const float t = (cursor.alpha - CURSOR_ALPHA_IDLE) / (CURSOR_ALPHA_PRESSED - CURSOR_ALPHA_IDLE);
+		for (u32 i = 0; i < 3; ++i) params.cursor_color[i] = CURSOR_COLOR_IDLE[i] + (CURSOR_COLOR_PRESSED[i] - CURSOR_COLOR_IDLE[i]) * t;
+		params.cursor_color[3] = 1.f;
 		void* params_ptr = gpu::map(m_params[index], sizeof(params));
 		memcpy(params_ptr, &params, sizeof(params));
 		gpu::unmap(m_params[index]);
@@ -1226,6 +1262,7 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 		settings.registerOption("videorec_fps", &m_fps);
 		settings.registerOption("videorec_quality", &m_quality);
 		settings.registerOption("videorec_preset", &m_preset);
+		settings.registerOption("videorec_cursor", &m_record_cursor);
 	}
 
 	~VideoRecorder() override {
@@ -1245,6 +1282,16 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 
 	bool isSourceAvailable() { return m_recording_source == SCENE_VIEW ? getSceneView() != nullptr : getGameView() != nullptr; }
 
+	// mouse position in pixels of the recorded view, returns false if the mouse is not over the view
+	bool getRecordedCursor(IVec2& pixel) {
+		if (m_recording_source == SCENE_VIEW) {
+			SceneView* view = getSceneView();
+			return view && view->getCursorPixel(pixel);
+		}
+		GameView* view = getGameView();
+		return view && view->getCursorPixel(pixel);
+	}
+
 	// true if a frame was requested and the recorded view did not render it yet (e.g. its window is hidden)
 	bool hasPendingCapture() {
 		MutexGuard guard(m_mutex);
@@ -1253,10 +1300,12 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 
 	// Pipeline job, end of the frame of a pipeline. Queues the final image of the recorded view for encoding.
 	void onRenderEnd(RenderBufferHandle output, Pipeline& pipeline) {
+		VideoCursor cursor;
 		{
 			MutexGuard guard(m_mutex);
 			if (!m_capture_requested || &pipeline != m_source_pipeline) return;
 			m_capture_requested = false;
+			cursor = m_cursor;
 		}
 		const IVec2 size = pipeline.getDisplaySize();
 		gpu::TextureHandle texture = m_renderer->toTexture(output);
@@ -1268,12 +1317,12 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 			return;
 		}
 		// the encoder records its commands to the command list of the renderer
-		m_renderer->getDrawStream().pushLambda([this, texture]() { submitFrame(texture); });
+		m_renderer->getDrawStream().pushLambda([this, texture, cursor]() { submitFrame(texture, cursor); });
 	}
 
 	// Render thread, the commands of the frame are being recorded.
-	void submitFrame(gpu::TextureHandle texture) {
-		const bool submitted = m_encoder->submit(texture);
+	void submitFrame(gpu::TextureHandle texture, const VideoCursor& cursor) {
+		const bool submitted = m_encoder->submit(texture, cursor);
 
 		MutexGuard guard(m_mutex);
 		if (!submitted) {
@@ -1396,6 +1445,7 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 		m_finish_sent = false;
 		m_paused_by_us = false;
 		m_recording_fps = settings.fps;
+		m_cursor_alpha = CURSOR_ALPHA_IDLE;
 		m_recording_path = path;
 
 		m_thread = LUMIX_NEW(m_app.getAllocator(), EncodeThread)(*this, m_app.getAllocator());
@@ -1516,11 +1566,20 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 			return;
 		}
 
+		VideoCursor cursor;
+		if (m_record_cursor) cursor.visible = getRecordedCursor(cursor.pixel);
+		// the opacity moves towards the target by a fixed step per video frame, so the fade lasts the same number of frames at any speed
+		const float target = cursor.visible && ImGui::IsAnyMouseDown() ? CURSOR_ALPHA_PRESSED : CURSOR_ALPHA_IDLE;
+		const float step = (CURSOR_ALPHA_PRESSED - CURSOR_ALPHA_IDLE) / (CURSOR_FADE_SECONDS * float(m_recording_fps));
+		if (target > m_cursor_alpha) m_cursor_alpha = target < m_cursor_alpha + step ? target : m_cursor_alpha + step;
+		else m_cursor_alpha = target > m_cursor_alpha - step ? target : m_cursor_alpha - step;
+		cursor.alpha = m_cursor_alpha;
 		{
 			MutexGuard guard(m_mutex);
 			++m_in_flight;
 			++in_flight;
 			m_capture_requested = true;
+			m_cursor = cursor;
 		}
 		if (in_flight >= m_soft_limit) {
 			engine.pause(true);
@@ -1544,12 +1603,20 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 
 			struct Preset { const char* name; i32 width; i32 height; i32 fps; i32 cq; i32 effort; };
 			static const Preset PRESETS[] = {
-				{ "Draft 720p@30", 1280, 720, 30, 32, 2 },
-				{ "1080p@30", 1920, 1080, 30, 26, 5 },
-				{ "HQ 1080p@60", 1920, 1080, 60, 22, 6 },
-				{ "HQ 4K@60", 3840, 2160, 60, 24, 5 },
-				// quality 44 and above looks the same, the bitrate stops growing
-				{ "Max 4K@60", 3840, 2160, 60, 8, 7 },
+				// same resolutions as in game view, 60 fps up to 4K, 30 fps above
+				{ "720p (1280x720)", 1280, 720, 60, 24, 5 },
+				{ "Steam Deck 16:10 (1280x800)", 1280, 800, 60, 24, 5 },
+				{ "Laptop (1366x768)", 1366, 768, 60, 24, 5 },
+				{ "Full HD (1920x1080)", 1920, 1080, 60, 24, 5 },
+				{ "WUXGA 16:10 (1920x1200)", 1920, 1200, 60, 24, 5 },
+				{ "1440p (2560x1440)", 2560, 1440, 60, 24, 5 },
+				{ "WQXGA 16:10 (2560x1600)", 2560, 1600, 60, 24, 5 },
+				{ "4K (3840x2160)", 3840, 2160, 60, 24, 5 },
+				{ "8K (7680x4320)", 7680, 4320, 30, 24, 5 },
+				{ "Ultrawide QHD 21:9 (3440x1440)", 3440, 1440, 60, 24, 5 },
+				{ "Super ultrawide 32:9 (5120x1440)", 5120, 1440, 30, 24, 5 },
+				{ "Square (1024x1024)", 1024, 1024, 60, 24, 5 },
+				{ "Portrait HD (1080x1920)", 1080, 1920, 60, 24, 5 },
 			};
 			const i32 custom_idx = (i32)lengthOf(PRESETS);
 			if (m_preset_idx < 0) {
@@ -1596,6 +1663,11 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 					: "Game view: rendered at the resolution below, its window can be closed.");
 			}
 			static const char* CODECS[] = { "AV1 (royalty free, RTX 40 series or newer)", "H.264", "HEVC" };
+			ImGuiEx::Label("Mouse marker");
+			ImGui::Checkbox("##cursor", &m_record_cursor);
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Draws a semitransparent circle at the mouse position while it is over the recorded view.\nThe circle gets more opaque and turns red while a mouse button is pressed.");
+			}
 			ImGuiEx::Label("Codec");
 			ImGui::Combo("##codec", &m_codec, CODECS, (int)lengthOf(CODECS));
 			if (ImGui::IsItemHovered()) {
@@ -1673,6 +1745,7 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 	i32 m_quality = 28;
 	i32 m_preset = 5;
 	i32 m_preset_idx = -1;	// UI only, index into the preset list, the last entry is custom
+	bool m_record_cursor = false;
 
 	// session, the mutex protects everything from here to `m_finish_requested`
 	Mutex m_mutex;
@@ -1690,8 +1763,10 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 	RenderHook m_hook;
 	Pipeline* m_source_pipeline = nullptr;	// pipeline of the recorded view, protected by the mutex
 	bool m_capture_requested = false;		// the next frame of the source pipeline has to be encoded, protected by the mutex
+	VideoCursor m_cursor;					// cursor of the next frame, protected by the mutex
 	u32 m_soft_limit = 0;
 	u32 m_recording_fps = 0;
+	float m_cursor_alpha = CURSOR_ALPHA_IDLE;	// opacity of the marker in the last request, moves towards the target, main thread only
 	bool m_finish_sent = false;
 	bool m_paused_by_us = false;
 	VideoEncoder* m_encoder = nullptr;
