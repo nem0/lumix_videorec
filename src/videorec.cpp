@@ -1,6 +1,6 @@
 // Records the game view or the scene view to a video file with the hardware encoder in NVIDIA GPUs (NVENC).
 //
-// The engine runs with a fixed time step while recording (one step per captured frame), so the video is smooth
+// The engine runs with a fixed time step while recording (optionally capturing every N-th step), so the video is smooth
 // even if the editor can't render in real time. If the encoder is too slow, the simulation is paused until it catches up.
 // Frames are encoded directly from GPU memory, there is no read-back to the CPU.
 
@@ -1260,6 +1260,7 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 		settings.registerOption("videorec_width", &m_width);
 		settings.registerOption("videorec_height", &m_height);
 		settings.registerOption("videorec_fps", &m_fps);
+		settings.registerOption("videorec_frame_interval", &m_frame_interval);
 		settings.registerOption("videorec_quality", &m_quality);
 		settings.registerOption("videorec_preset", &m_preset);
 		settings.registerOption("videorec_cursor", &m_record_cursor);
@@ -1445,6 +1446,8 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 		m_finish_sent = false;
 		m_paused_by_us = false;
 		m_recording_fps = settings.fps;
+		m_recording_frame_interval = u32(maximum(m_frame_interval, 1));
+		m_frames_to_skip = 0;
 		m_cursor_alpha = CURSOR_ALPHA_IDLE;
 		m_recording_path = path;
 
@@ -1566,6 +1569,12 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 			return;
 		}
 
+		if (m_frames_to_skip > 0) {
+			--m_frames_to_skip;
+			return;
+		}
+		m_frames_to_skip = m_recording_frame_interval - 1;
+
 		VideoCursor cursor;
 		if (m_record_cursor) cursor.visible = getRecordedCursor(cursor.pixel);
 		// the opacity moves towards the target by a fixed step per video frame, so the fade lasts the same number of frames at any speed
@@ -1663,6 +1672,12 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 					: "Game view: rendered at the resolution below, its window can be closed.");
 			}
 			static const char* CODECS[] = { "AV1 (royalty free, RTX 40 series or newer)", "H.264", "HEVC" };
+			ImGuiEx::Label("Record every N-th frame");
+			ImGui::InputInt("##frame_interval", &m_frame_interval);
+			m_frame_interval = maximum(m_frame_interval, 1);
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("1 records every frame. Higher values skip simulation frames and speed up the video\nby this factor. The video FPS and fixed simulation step stay the same.");
+			}
 			ImGuiEx::Label("Mouse marker");
 			ImGui::Checkbox("##cursor", &m_record_cursor);
 			if (ImGui::IsItemHovered()) {
@@ -1742,6 +1757,7 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 	i32 m_width = 1920;
 	i32 m_height = 1080;
 	i32 m_fps = 60;
+	i32 m_frame_interval = 1;
 	i32 m_quality = 28;
 	i32 m_preset = 5;
 	i32 m_preset_idx = -1;	// UI only, index into the preset list, the last entry is custom
@@ -1766,6 +1782,8 @@ struct VideoRecorder final : StudioApp::GUIPlugin {
 	VideoCursor m_cursor;					// cursor of the next frame, protected by the mutex
 	u32 m_soft_limit = 0;
 	u32 m_recording_fps = 0;
+	u32 m_recording_frame_interval = 1;
+	u32 m_frames_to_skip = 0;
 	float m_cursor_alpha = CURSOR_ALPHA_IDLE;	// opacity of the marker in the last request, moves towards the target, main thread only
 	bool m_finish_sent = false;
 	bool m_paused_by_us = false;

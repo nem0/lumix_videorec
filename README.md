@@ -29,6 +29,7 @@ See https://nem0.github.io/LumixEngine/plugins.html
 | Codec | AV1, H.264 or HEVC. |
 | Width / Height | (`Custom` preset only) Resolution of the game view video, rounded down to even numbers. The game view is rendered at this size while recording, its window does not need to be open or visible. |
 | FPS | (`Custom` preset only) Frame rate of the video and of the fixed simulation step. |
+| Record every N-th frame | Capture one frame every N simulation steps, starting with the first frame. Defaults to 1 (every frame). Higher values speed up playback by N while keeping the video FPS and fixed simulation step unchanged. Available with all presets; saved as `videorec_frame_interval`. |
 | Quality | (`Custom` preset only) 1-51, higher is better and makes bigger files. It is NVENC's constant quality level (CQ) inverted, the saved `videorec_quality` setting is the CQ itself (`52 - quality`, lower is better). |
 | Encoder effort | (`Custom` preset only) NVENC preset P1-P7, not the target quality (that is Quality). Higher spends more GPU time to compress better at the same quality, 1 is the fastest, 7 the slowest. Saved as `videorec_preset`. |
 
@@ -38,7 +39,7 @@ Settings are saved with Studio's settings (`videorec_*` in `studio.ini`). The re
 
 ## How it works
 
-- While recording, the engine runs with a **fixed time step** (`Engine::setFixedTimeDelta`, `1 / FPS`) and exactly one frame is captured per step, so the video is smooth even when Studio can't render in real time. Recording a heavy scene just takes longer than the video lasts.
+- While recording, the engine runs with a **fixed time step** (`Engine::setFixedTimeDelta`, `1 / FPS`) and one frame is captured every N steps, as set by **Record every N-th frame**. At the default of 1, the video is smooth even when Studio can't render in real time. Recording a heavy scene just takes longer than the video lasts.
 - The recorder is a `RenderPlugin`. Its `renderEnd` hook (called at the end of every frame, after the UI, film grain and 2D drawing) gets the final image of the recorded view's pipeline and queues the encoding on the render thread.
 - A small compute pass converts the image from RGBA8 (sRGB) to BGRA8, the result is copied to a ring of 6 textures registered in NVENC, and NVENC encodes them through its D3D12 interface, waiting on the fence of the renderer frame. A worker thread waits for NVENC's output fence and writes the bitstream to the file.
 - If the encoder falls behind, the simulation is paused until it catches up, frames are not dropped. The same happens if the recorded view does not render (e.g. its window is hidden).
